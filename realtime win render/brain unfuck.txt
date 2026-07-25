@@ -1,0 +1,32 @@
+-need a DIB
+-need to edit DIB pixels by indexing
+-need to copy the final DIB to the screen somehow
+
+-update function only has HDC
+-DC has Selected the HBM (can get with current object function)
+-HBM of DC is DDB
+-can create DIB from DDB using getDIBits
+-SetDIBitsToDevice copies stuff from DIB to HDC
+-StretchDIBits also does, but can scale the image
+-bitmap bits need to be indexed to system palette(GetSystemPaletteEntries)
+-call SetDIBitsToDevice multiple times to draw portion of bitmap to screen
+-
+-SetDIBitsToDevice needs 'lpvBits' 
+
+-BITMAP could be contained within DIBSECTION
+
+
+
+
+-try modifying the bitmap directly by indexing
+=>NO
+-cannot edit the original bitmap of HBM using getobject (it only copies)
+
+
+
+-should create an array of number(lpvBits) and then SetDIBits into DC
+-modify stuff in the lpvBits by indexing
+
+-create a buffer to store pixel rgb data
+-create BITMAPINFO struct manually
+-use SetDIBitsToDevice to copy data to DC

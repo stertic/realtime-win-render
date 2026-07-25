@@ -1,0 +1,88 @@
+todo:
+-fix %s printing in printDebug function
+-replace malloc/free with new/delete (realloc with vector)
+-cullingggggggg
+-add vertNormalData / vertTextureData support for renderObj
+-compare between storing culled info in separate bool array for tri and
+running if in another loop or organizing not culled tris into another array(involving memcpy)
+-try importing multiple obj files
+-try deleting facenormal vector in tri struct and cull just from vert order
+done -add vect4 / vect3 conversion method
+-measure runtime to compare dot product culling / clipspace culling
+-check for win32 functions for exclusivels rendering triangles
+-realloc mesh in renderObj to suit calculated triCount
+-change index types to uint32_t from unsigned int, check size of unsigned int
+-only transform face normals of not culled faces
+-fix initialObjCount
+-remove tricount/vpcount/vncount/vtcount for object struct if possible
+-support multiple whitespaces after f/v prefixes in objparsing
+-change 1/2/3 read to just be one scanf instead of using memset in number read
+-make init functions into constructors/destructors
+-move model's vertex datas(currently in scene struct) into object struct
+-divide up the whole code to multiple header and source files
+-fix initialization of openBL so that it doesn't check for initialization every frame
+-create 'husk' struct of obj(containing worldspace position, tri, vertex count) for
+functions which aren't enough to warrant adding elements to obj struct but would be
+better implemented per-object instead of a continuous list
+-fix all custom struct type declarations(vect4 matrix44 tanglement and so)
+-make triRender an array of pointers to triangles to render instead of copying data to an array of triangles
+-check for any memory leaks in freeing functions(initScene, initRenderObj)
+-rewrite scene struct's constructor
+-convert the keybinds into image(printdebug consumes a lot of compute)
+-set the cursor of window's class to null so that it normally doens't show up(only show up when calling setcursor)
+
+note:
+-facenormal transform implementation is not in a linear array, it references
+each data inside fragmented struct locations. polish needed, consider moving
+facenormal calculation to inside update function instead of inside objparse.
+
+-making indicies be from 0 instead of relative to object, also storing all
+data(vertData, vertNormalData, vertTextureData) on a giant array inside scene.
+parsing an obj file appends to the list instead of assigning data into object structs.
+
+-having transform datas requires storing the calculated results. think rendering
+the calculated results directly without a 'saving' step might be needed.
+
+*renamed mesh to tris to avoid confusion, for future naming i will not come up with
+a new term for an array of structs and instead simply use the plural.(ex: tri->tris stick->sticks)
+*objects do not conform however. they're just object->obj
+
+list of onscreen elements:
+-sticks(implementing)
+-text to be displayed(not yet implemented)
+
+////////// CULLING REVISIONS //////////
+VERSION1 CULLING
+formerly culling was done by first culling individual vertices after the transform into clipspace.
+after that vector required for culling based on face normals was calculated, and then in the loop that
+goes through all faces, first it checked if all vertices were culled and second it performed the facenormal check.
+if any of the three vertices wasn't culled the triangle was to be rendered.
+
+VERSION2 CULLING
+after some development I eventually tried implementing proper culling of the triangles via Sotherland-Hodgeman algo.
+I failed however after attempting to implement all edge cases manually and eventually abandoned it.
+in this attempt I tried defining a new set of array of triangles whose members were the triangles to be rendered and
+which has gone through clipping. This meant the vertex-wise culling array wasn't needed, so i tried removing the
+associated code entirely.
+
+VERSION3 CULLING	
+now I am trying to go back to the old culling method.
+this unfortunately means things like 'discontinued culling' is possibly in need and required to be brought back.
+for clarity the versions will be called VERSION1, VERSION2, VERSION3 culling in chronological order.
+version3 is named separately in case there were modifications between ver1 and ver3, but in essence ver3 is
+a recreation of ver1.
+*/
+
+
+future:
+-creating instances of objects by creating a bunch of transVertDatArr
+and passing each through different matrix transforms
+-automatic triangulation handling
+-efficient normals with only averaging the projected onscreen coordinates and then drawing a line in a direction with length determined with triginometery
+-check if normalization is being done multiple times and if so store the length in the vector struct for reuse
+-multi frustum rendering
+-while culling, the area in which the vertex is located is enumerated up to only 27 but uses unsigned int(256).
+create a struct or a class of 8 5 bit types instead and create a indexing macro or member function
+-implement ply file parsing
+
+maybe this is a point where i need to stop. I have to learn opengl. this is my comfort zone
