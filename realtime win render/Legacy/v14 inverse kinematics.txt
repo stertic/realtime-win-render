@@ -1,0 +1,190 @@
+#include <stdio.h>
+#include <math.h>
+#include <Windows.h>
+#include <conio.h>
+#include <stdbool.h>
+
+#define gotoxy(x, y) printf("\033[%d;%dH", (int)roundf(y), (int)roundf(x));
+#define clrscr() printf("\033[H\033[J");
+
+const pi = 3.141592;
+const rad = 57.29577; //180 / pi
+
+void drawLine(float xA, float yA, float xB, float yB) {
+	float dx = xB - xA;
+	float dy = yB - yA;
+	float m = dy / dx, temp, incm;
+	if (fabsf(m) <= 1) {
+		incm = m;
+		if (xA < xB) {
+			temp = yA;
+			for (float i = xA; i <= xB; i++) {
+				gotoxy(i, temp);
+				putchar(64);
+				temp += incm;
+			}
+		}
+		else {
+			temp = yB;
+			for (float i = xB; i <= xA; i++) {
+				gotoxy(i, temp);
+				putchar(64);
+				temp += incm;
+			}
+		}
+	}
+	else {
+		incm = dx / dy;
+		if (yA < yB) {
+			temp = xA;
+			for (float i = yA; i <= yB; i++) {
+				gotoxy(temp, i);
+				putchar(64);
+				temp += incm;
+			}
+		}
+		else {
+			temp = xB;
+			for (float i = yB; i <= yA; i++) {
+				gotoxy(temp, i);
+				putchar(64);
+				temp += incm;
+			}
+		}
+	}
+	gotoxy(xA, yA);
+	putchar(88);
+	gotoxy(xB, yB);
+	putchar(88);
+}
+
+float squ(float x) {
+	return x * x;
+}
+
+float dist(float x0, float y0, float x1, float y1) {
+	return sqrtf(squ(x0 - x1) + squ(y0 - y1));
+}
+
+void angleTrig(float x0, float y0, float xM, float yM, float x1, float y1, float* outDeg) {
+	*outDeg = (atanf(fabsf(y0 - yM) / fabsf(x0 - xM)) + atanf(fabsf(y1 - yM) / fabsf(x1 - xM))) * rad;
+	return;
+}
+
+bool circleIntersect(float x0, float y0, float r0, float x1, float y1, float r1, float* outXY, float polX, float polY) {
+	float x2, y2, a, d, h;
+	float dx = x1 - x0;
+	float dy = y1 - y0;
+	d = sqrtf((dx * dx) + (dy * dy));
+	if (d > (r0 + r1)) //no intersection
+		return true;
+	else if (fabsf(r1 - r0) > d) //inside
+		return true;
+	a = ((r0 * r0) - (r1 * r1) + (d * d)) / (2.0 * d);
+	h = sqrtf((r0 * r0) - (a * a));
+	x2 = x0 + ((a * dx) / d);
+	y2 = y0 + ((a * dy) / d);
+	float tx = dx * (h / d);
+	float ty = dy * (h / d);
+	if (dist(polX, polY, x2 + ty, y2 - tx) < dist(polX, polY, x2 - ty, y2 + tx)) {
+		*outXY = x2 + ty;
+		*(outXY + 1) = y2 - tx;
+	}
+	else {
+		*outXY = x2 - ty;
+		*(outXY + 1) = y2 + tx;
+	}
+	return false;
+}
+
+const mov = 1; //movement speed
+
+/*
+  _                                _    _                            _   _\n
+ (_)                              | |  (_)                          | | (_)\n
+  _ _ ____   _____ _ __ ___  ___  | | ___ _ __   ___ _ __ ___   __ _| |_ _  ___ ___\n
+ | | '_ \ \ / / _ \ '__/ __|/ _ \ | |/ / | '_ \ / _ \ '_ ` _ \ / _` | __| |/ __/ __|\n
+ | | | | \ V /  __/ |  \__ \  __/ |   <| | | | |  __/ | | | | | (_| | |_| | (__\__ \\n
+ |_|_| |_|\_/ \___|_|  |___/\___| |_|\_\_|_| |_|\___|_| |_| |_|\__,_|\__|_|\___|___/\n
+*/
+void main() {
+	float jointLen[10] = { 0 }, vertDeg[10] = { 0 }, vertPos[11][2] = { 0 }; //vertPos[n][0] = X, vertPos[n][1] = Y, 0 = base, inp = target
+	float pole[2], totLen = 0, saveTotLen = 0, tarToBase, maxLen = 0, minLen, maxLenIndex;
+	int inp;
+	float* mod;
+	char wasd;
+	bool p = false;
+	printf("  _                                _    _                            _   _\n (_)                              | |  (_)                          | | (_)\n  _ _ ____   _____ _ __ ___  ___  | | ___ _ __   ___ _ __ ___   __ _| |_ _  ___ ___\n | | '_ \\ \\ / / _ \\ '__/ __|/ _ \\ | |/ / | '_ \\ / _ \\ '_ ` _ \\ / _` | __| |/ __/ __|\n | | | | \\ V /  __/ |  \\__ \\  __/ |   <| | | | |  __/ | | | | | (_| | |_| | (__\\__ \\\n |_|_| |_|\\_/ \\___|_|  |___/\\___| |_|\\_\\_|_| |_|\\___|_| |_| |_|\\__,_|\\__|_|\\___|___/\n\n by Brian Lee\n\n");
+	printf("enter segment amount(1<n<11): ");
+	scanf("%d", &inp);
+	for (int i = 0; i < inp; i++) {
+		printf("enter segment %d length: ", i + 1);
+		scanf("%f", &jointLen[i]);
+		saveTotLen += jointLen[i];
+	}
+	printf("startX, startY: ");
+	scanf("%f %f", &vertPos[0][0], &vertPos[0][1]);
+	printf("targetX, targetY: ");
+	scanf("%f %f", &vertPos[inp][1], &vertPos[inp][0]);
+	printf("poleX, poleY: ");
+	scanf("%f %f", &pole[0], &pole[1]);
+	tarToBase = dist(vertPos[0][0], vertPos[0][1], vertPos[inp][0], vertPos[inp][1]);
+	if (tarToBase > saveTotLen) {
+		printf("totlen  > target distance");
+		exit(0);
+	}
+	while (1) {
+		totLen = saveTotLen;
+		tarToBase = dist(vertPos[0][0], vertPos[0][1], vertPos[inp][0], vertPos[inp][1]);
+		//(1 - (tarToBase / totLen)) * (len[i] + len[i + 1]) + tarToBase
+		for (int i = inp; i > 1; i--) {
+			totLen -= jointLen[i - 1];
+			if (circleIntersect(vertPos[0][0], vertPos[0][1], totLen * 0.75, vertPos[i][0], vertPos[i][1], jointLen[i - 1], &vertPos[i - 1], pole[0], pole[1])) {
+				//failed circle intersection
+			}
+		}
+		angleTrig(vertPos[0][0] + 10, vertPos[0][1], vertPos[0][0], vertPos[0][1], vertPos[1][0], vertPos[1][1], &vertDeg[0]);
+		for (int i = 1; i < inp; i++)
+			angleTrig(vertPos[i - 1][0], vertPos[i - 1][1], vertPos[i][0], vertPos[i][1], vertPos[i + 1][0], vertPos[i + 1][1], &vertDeg[i]);
+		clrscr();
+		for (int i = 0; i < inp; i++)
+			drawLine(vertPos[i][0] + 50, vertPos[i][1] + 50, 
+				vertPos[i + 1][0] + 50, vertPos[i + 1][1] + 50);
+		gotoxy(0, 0);
+		for (int i = 0; i < inp; i++)
+			printf("vertDEG %d : %d\n", i, vertDeg[i]);
+		gotoxy(vertPos[0][0] + 50, vertPos[0][1] + 50);
+		putchar(83); //[S]tart
+		gotoxy(vertPos[inp][0] + 50, vertPos[inp][1] + 50);
+		putchar(84); //[T]arget
+		gotoxy(pole[0] + 50, pole[1] + 50);
+		putchar(80); //[P]ole
+		gotoxy(100, 100);
+		if (!p) {
+			mod = &vertPos[inp];
+		}
+		else {
+			printf("POLE");
+			mod = &pole;
+		}
+		wasd = getch();
+		switch (wasd) {
+		case 'w':
+			*(mod + 1) -= mov;
+			break;
+		case 's':
+			*(mod + 1) += mov;
+			break;
+		case 'a':
+			*mod -= mov;
+			break;
+		case 'd':
+			*mod += mov;
+			break;
+		case 'p':
+			if (p) { p = false; }
+			else { p = true; }
+		}
+	}
+	return;
+}

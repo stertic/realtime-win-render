@@ -1,0 +1,286 @@
+// WindowsProject test.cpp : Defines the entry point for the application.
+//
+
+#include "framework.h"
+#include "WindowsProject test.h"
+#include <cstdint>
+
+#define MAX_LOADSTRING 100
+
+// Global Variables:
+HINSTANCE hInst;                                // current instance
+WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
+WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
+
+// Forward declarations of functions included in this code module:
+ATOM                MyRegisterClass(HINSTANCE hInstance);
+BOOL                InitInstance(HINSTANCE, int);
+LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
+
+int WINAPI wWinMain(_In_ HINSTANCE hInstance,
+                     _In_opt_ HINSTANCE hPrevInstance,
+                     _In_ LPWSTR    lpCmdLine,
+                     _In_ int       nCmdShow)
+{
+    UNREFERENCED_PARAMETER(hPrevInstance);
+    UNREFERENCED_PARAMETER(lpCmdLine);
+
+    // TODO: Place code here.
+
+    // Initialize global strings
+    LoadStringW(hInstance, IDS_APP_TITLE, szTitle, MAX_LOADSTRING);
+    LoadStringW(hInstance, IDC_WINDOWSPROJECTTEST, szWindowClass, MAX_LOADSTRING);
+    MyRegisterClass(hInstance);
+
+    // Perform application initialization:
+    if (!InitInstance (hInstance, nCmdShow))
+    {
+        return FALSE;
+    }
+
+    HACCEL hAccelTable = LoadAccelerators(hInstance, MAKEINTRESOURCE(IDC_WINDOWSPROJECTTEST));
+
+    MSG msg;
+
+    // Main message loop:
+    while (GetMessage(&msg, nullptr, 0, 0))
+    {
+        if (!TranslateAccelerator(msg.hwnd, hAccelTable, &msg))
+        {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+    }
+
+    return (int) msg.wParam;
+}
+
+ATOM MyRegisterClass(HINSTANCE hInstance)
+{
+    WNDCLASSEXW wcex;
+
+    wcex.cbSize = sizeof(WNDCLASSEX);
+
+    wcex.style          = 0;
+    wcex.lpfnWndProc    = WndProc;
+    wcex.cbClsExtra     = 0;
+    wcex.cbWndExtra     = 0;
+    wcex.hInstance      = hInstance;
+    wcex.hIcon          = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_WINDOWSPROJECTTEST));
+    wcex.hCursor        = LoadCursor(nullptr, IDC_ARROW);
+    wcex.hbrBackground  = (HBRUSH)(COLOR_WINDOW+1);
+    wcex.lpszMenuName   = MAKEINTRESOURCEW(IDC_WINDOWSPROJECTTEST);
+    wcex.lpszClassName  = szWindowClass;
+    wcex.hIconSm        = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_SMALL));
+
+    return RegisterClassExW(&wcex);
+}
+
+//
+//   FUNCTION: InitInstance(HINSTANCE, int)
+//
+//   PURPOSE: Saves instance handle and creates main window
+//
+//   COMMENTS:
+//
+//        In this function, we save the instance handle in a global variable and
+//        create and display the main program window.
+//
+BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
+{
+   hInst = hInstance; // Store instance handle in our global variable
+
+   HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
+      CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+
+   if (!hWnd)
+   {
+      return FALSE;
+   }
+
+   ShowWindow(hWnd, nCmdShow);
+   UpdateWindow(hWnd);
+
+   return TRUE;
+}
+
+enum timer {
+    RENDER = 10
+};
+
+typedef struct {
+    uint8_t r, g, b;
+} RGB;
+
+typedef struct {
+    RGB* renderPass;
+    BITMAPINFO renderDIBINFO;
+    unsigned int resX, resY;
+} sceneShell;
+
+void initBuffer(HWND& hWnd, HDC& bufferHDC, HBITMAP& bufferHBM, sceneShell& inpShell);
+void freeBuffer(HDC& bufferHDC, HBITMAP& bufferHBM, sceneShell& inpShell);
+
+void editImage(const HDC& bufferHDC, const sceneShell& inpShell) {
+    memset(inpShell.renderPass, 0, inpShell.renderDIBINFO.bmiHeader.biSizeImage);
+    RGB* stripes = new RGB[inpShell.resX]{};
+    for (unsigned int i = 0; i < inpShell.resX; i++) {
+        if (i % 10 == 0) {
+            stripes[i] = RGB{ 255, 255, 255 };
+        }
+    }
+    for (unsigned int i = 0; i < inpShell.resY; i++) {
+        memcpy(&(inpShell.renderPass[i * inpShell.resX]), stripes, sizeof(RGB) * inpShell.resX);
+    }
+    SetDIBitsToDevice(bufferHDC, 0, 0, inpShell.resX, inpShell.resY, 0, 0, 0, inpShell.resY, inpShell.renderPass, &inpShell.renderDIBINFO, DIB_RGB_COLORS);
+    delete[] stripes;
+    return;
+}
+
+void printDebug(HDC hdc, const wchar_t* format, ...) {
+    va_list args;
+    va_start(args, format);
+    RECT textBound = {
+            10,	//left
+            10,	//top
+    };
+    int prevBkMode = SetBkMode(hdc, TRANSPARENT), bufferSize = 128;
+    COLORREF prevTextCol = SetTextColor(hdc, RGB(255, 255, 255));
+
+    wchar_t* printBuffer = new wchar_t[bufferSize];
+    vswprintf_s(printBuffer, bufferSize, format, args);
+    DrawText(hdc, printBuffer, -1, &textBound, DT_LEFT | DT_TOP | DT_NOCLIP);
+    delete[] printBuffer;
+
+    va_end(args);
+    SetBkMode(hdc, prevBkMode);
+    SetTextColor(hdc, prevTextCol);
+    return;
+}
+
+sceneShell mainShell;
+
+LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    static HDC bufferHDC;
+    static HBITMAP bufferHBM;
+
+    switch (message)
+    {
+    case WM_COMMAND:
+        {
+            int wmId = LOWORD(wParam);
+            // Parse the menu selections:
+            switch (wmId)
+            {
+            case IDM_ABOUT:
+                DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, About);
+                break;
+            case IDM_EXIT:
+                DestroyWindow(hWnd);
+                break;
+            default:
+                return DefWindowProc(hWnd, message, wParam, lParam);
+            }
+        }
+        break;
+    case WM_CREATE:
+    {
+        initBuffer(hWnd, bufferHDC, bufferHBM, mainShell);
+        SetTimer(hWnd, RENDER, 30, NULL);
+        break;
+    }
+    case WM_MOVE :
+    case WM_SIZE :
+    {
+        freeBuffer(bufferHDC, bufferHBM, mainShell);
+        initBuffer(hWnd, bufferHDC, bufferHBM, mainShell);
+        break;
+    }
+    case WM_TIMER: 
+        InvalidateRect(hWnd, NULL, FALSE);
+        break;
+    case WM_ERASEBKGND :
+        return 1;
+        break;
+    case WM_PAINT:
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hWnd, &ps);
+            editImage(bufferHDC, mainShell);
+            printDebug(bufferHDC, L"%d %d", mainShell.resX, mainShell.resY);
+
+            BitBlt(hdc, 0, 0, mainShell.resX, mainShell.resY, bufferHDC, 0, 0, SRCCOPY);
+            EndPaint(hWnd, &ps);
+        }
+        break;
+    case WM_DESTROY:
+        freeBuffer(bufferHDC, bufferHBM, mainShell);
+        KillTimer(hWnd, RENDER);
+        PostQuitMessage(0);
+        break;
+    default:
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+    return 0;
+}
+
+void initBuffer(HWND& hWnd, HDC& bufferHDC, HBITMAP& bufferHBM, sceneShell& inpShell) {
+    HDC hdc = GetDC(hWnd);
+    RECT cliRect;
+    GetClientRect(hWnd, &cliRect);
+
+    bufferHDC = CreateCompatibleDC(hdc);
+    bufferHBM = CreateCompatibleBitmap(hdc, cliRect.right, cliRect.bottom);
+    SelectObject(bufferHDC, bufferHBM);
+
+    inpShell.resX = cliRect.right;
+    inpShell.resY = cliRect.bottom;
+    int pixelCount = inpShell.resX * inpShell.resY;
+    if (pixelCount)
+        inpShell.renderPass = new RGB[pixelCount];
+
+    inpShell.renderDIBINFO.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    GetDIBits(bufferHDC, bufferHBM, 0, inpShell.resY, NULL, (LPBITMAPINFO)&inpShell.renderDIBINFO, DIB_RGB_COLORS);
+
+    inpShell.renderDIBINFO.bmiHeader.biWidth = inpShell.resX;
+    inpShell.renderDIBINFO.bmiHeader.biHeight = -(int)(inpShell.resY); //top-down
+    inpShell.renderDIBINFO.bmiHeader.biBitCount = 24;
+    inpShell.renderDIBINFO.bmiHeader.biCompression = BI_RGB;
+    inpShell.renderDIBINFO.bmiHeader.biSizeImage = pixelCount * 3;
+    inpShell.renderDIBINFO.bmiHeader.biClrUsed = false;
+    inpShell.renderDIBINFO.bmiHeader.biPlanes = 1;
+
+    ReleaseDC(hWnd, hdc);
+    return;
+}
+
+void freeBuffer(HDC& bufferHDC, HBITMAP& bufferHBM, sceneShell& inpShell) {
+    if(inpShell.renderDIBINFO.bmiHeader.biSizeImage)
+        delete[] inpShell.renderPass;
+
+    DeleteObject(bufferHBM);
+    DeleteDC(bufferHDC);
+    return;
+}
+
+// Message handler for about box.
+INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
+}

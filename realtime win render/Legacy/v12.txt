@@ -1,0 +1,431 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdbool.h>
+#include <time.h>
+
+#define width 1280
+#define height 720
+//range of canvas coordinates in code: 0 ~ width - 1, 0 ~ height - 1
+
+//LV = location vector
+//RV = rotation vector, could be unit vector or not a unit vector
+//all vectors are stored in double type
+//all angles are done in radians
+//for pixel coordinates, higher x = right, higher y = down
+
+//rgb are stored in char because it's 1 byte so it's efficient for storing numbers within 0 ~ 255
+//needs to be unsigned or it gives minus rgb values
+typedef struct {
+	unsigned char r;
+	unsigned char b;
+	unsigned char g;
+} RGB;
+
+typedef struct {
+	unsigned int x;
+	unsigned int y;
+} XY;
+
+typedef struct {
+	double u;
+	double v;
+	double w;
+} UV;
+
+typedef struct {
+	double x;
+	double y;
+	double z;
+} vector;
+
+//data inside struct 'face' are all indeces, NOT VALUES
+//all are pointers pointing to an array of indices
+//negative indeces are interpreted into a positive index in reading stage
+//indices start at 1, 0 means unused.
+typedef struct {
+	unsigned int vertCount;
+	unsigned int* point;
+	unsigned int* texture;
+	unsigned int* normal;
+	vector faceNormal;
+} face;
+
+typedef struct {
+	char* name;
+	int faceCount;
+	int shadeSmooth;
+	face* mesh;
+} object;
+
+vector vectorAdd(vector vectA, vector vectB) {
+	vector calcResult;
+	calcResult.x = vectA.x + vectB.x;
+	calcResult.y = vectA.y + vectB.y;
+	calcResult.z = vectA.z + vectB.z;
+	return calcResult;
+}
+
+vector vectorSubtract(vector vectA, vector vectB) {
+	vector calcResult;
+	calcResult.x = vectA.x - vectB.x;
+	calcResult.y = vectA.y - vectB.y;
+	calcResult.z = vectA.z - vectB.z;
+	return calcResult;
+}
+
+vector vectorScale(double scalar, vector vect) {
+	vector calcResult;
+	calcResult.x = scalar * vect.x;
+	calcResult.y = scalar * vect.y;
+	calcResult.z = scalar * vect.z;
+	return calcResult;
+}
+
+void drawLine(RGB (*drawTo)[height], int aX, int aY, int bX, int bY, RGB lineCol) {
+	int cursor, advance;
+	//cursor glides through the chose axis, couple is the other axis.
+	float couple, slope;
+	//slope is RELATIVE TO MAIN AXIS! it's not always dx/dy
+	if (fabsf((float)(aY - bY) / (float)(aX - bX)) > 1) {
+		//cursor advances in Y direction
+		cursor = aY;
+		if (aY == bY)
+			advance = 0;
+		else
+			advance = (bY - aY) / abs(bY - aY);
+		couple = (float)aX;
+		slope = ((float)(aX - bX) / (float)(aY - bY)) * advance;
+		while (cursor != bY) {
+			drawTo[(int)couple][cursor].r = lineCol.r;
+			drawTo[(int)couple][cursor].g = lineCol.g;
+			drawTo[(int)couple][cursor].b = lineCol.b;
+			cursor += advance;
+			couple += slope;
+		}
+	}
+	else {
+		//cursor advances in X direction
+		cursor = aX;
+		if (aX == bX)
+			advance = 0;
+		else
+			advance = (bX - aX) / abs(bX - aX);
+		couple = (float)aY;
+		slope = ((float)(aY - bY) / (float)(aX - bX)) * advance;
+		while (cursor != bX) {
+			drawTo[cursor][(int)couple].r = lineCol.r;
+			drawTo[cursor][(int)couple].g = lineCol.g;
+			drawTo[cursor][(int)couple].b = lineCol.b;
+			cursor += advance;
+			couple += slope;
+		}
+	}
+	return;
+}
+
+void drawFace(RGB(*drawTo)[height], face targetFace, XY* screenspaceXY, RGB colorPicker) {
+	XY screenspaceStart, screenspaceEnd;
+	unsigned int screenLastPoint = targetFace.point[targetFace.vertCount - 1];
+	for (int tarVert = 0; tarVert < (int)(targetFace.vertCount) - 1; tarVert++) {
+		screenspaceStart = screenspaceXY[targetFace.point[tarVert] - 1];
+		screenspaceEnd = screenspaceXY[targetFace.point[tarVert + 1] - 1];
+		drawLine(drawTo, screenspaceStart.x, screenspaceStart.y, screenspaceEnd.x, screenspaceEnd.y, colorPicker);
+	}
+	drawLine(drawTo, screenspaceXY[screenLastPoint - 1].x, screenspaceXY[screenLastPoint - 1].y, screenspaceXY[targetFace.point[0] - 1].x, screenspaceXY[targetFace.point[0] - 1].y, colorPicker);
+	return;
+}
+
+void addData(unsigned int** memBlock, int data, int wrapAround, unsigned int vertCount) {
+	void* tempPtr;
+	tempPtr = (unsigned int*)realloc(*memBlock, sizeof(unsigned int) * vertCount);
+	if (tempPtr == NULL) {
+		printf("failed to reallocate memory within addData. memory was not freed instantly.\n");
+		return;
+	}
+	*memBlock = tempPtr;
+	if (data >= 0)
+		(*memBlock)[vertCount - 1] = data;
+	else
+		(*memBlock)[vertCount - 1] = wrapAround + data + 1;
+	return;
+}
+
+void vertIndices(face* curFace, int* data, int wrapAround) {
+	//vertex position index allocation
+	addData(&(curFace->point), data[0], wrapAround, curFace->vertCount);
+
+	//vertex texture coordinate index allocation
+	addData(&(curFace->texture), data[1], wrapAround, curFace->vertCount);
+	
+	//vertex normal index allocation
+	addData(&(curFace->normal), data[2], wrapAround, curFace->vertCount);
+	return;
+}
+
+void fprintfRGB(FILE* stream, unsigned char red, unsigned char green, unsigned char blue) {
+	fputc((red / 100) + '0', stream);
+	fputc(((red / 10) % 10) + '0', stream);
+	fputc((red % 10) + '0', stream);
+	fputc(' ', stream);
+
+	fputc((green / 100) + '0', stream);
+	fputc(((green / 10) % 10) + '0', stream);
+	fputc((green % 10) + '0', stream);
+	fputc(' ', stream);
+
+	fputc((blue / 100) + '0', stream);
+	fputc(((blue / 10) % 10) + '0', stream);
+	fputc((blue % 10) + '0', stream);
+	fputc('\t', stream);
+	return;
+}
+
+//FOV is measured on the X axis
+//size of projection plane: X = cameraScale, Y = (resolutionY / resolutionX) * cameraScale
+void main() {
+	const vector worldOriginLV = { .x = 0, .y = 0, .z = 0 };
+	void* heapMemPtr;
+	int argCount;
+	int widthHalf = width / 2, heightHalf = height / 2, inpBufferCursor, indexBufferCursor;
+	double FOV = 2.0943951023931954, cameraScale = 50, perspDist;
+	vector perspLV = { .x = 0, .y = 0, .z = 0 };
+	vector vectorBuffer;
+	//global counters for index assigning
+	int vertexCount = 0, vertNormalCount = 0, vertTextureCount = 0, objectCount = 0, vertAttribute[3], indexType;
+	char inputBuffer[256], indexBuffer[32];
+	vector cameraLV = { .x = 0, .y = 0, .z = 0 }, cameraRV = { .x = 0, .y = 0, .z = 1 };
+	vector(*meshVertex) = (vector*)malloc(0);
+	vector(*meshVertNormal) = (vector*)malloc(0);
+	UV(*meshVertTexture) = (UV*)malloc(0);
+	object(*sceneObject) = (object*)malloc(0);
+	vector(*projectedVector) = (vector*)malloc(0);
+	XY(*screenspaceXY) = (XY*)malloc(0);
+	RGB(*render)[height] = (RGB(*)[height])malloc(sizeof(RGB) * width * height);
+	RGB colorPicker = { .r = 255, .b = 255, .g = 255 };
+
+	double startEXECTIME = 0, objParsingEXECTIME = 0, vectorCalcEXECTIME = 0, endEXECTIME = 0;
+	startEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	FILE* modelInputOBJ = fopen("resources\\test cube.obj", "rt");
+	if (modelInputOBJ == NULL) {
+		printf("input .obj file not found\n");
+		goto freeMem;
+	}
+	FILE* renderResult = fopen("resources\\render result.ppm", "wt");
+	//initialize ppm
+	fprintf(renderResult, "P3\n%d %d\n255\n", width, height);
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			render[x][y].r = 50;
+			render[x][y].b = 50;
+			render[x][y].g = 50;
+		}
+	}
+	//obj parsing
+	fgets(inputBuffer, 256, modelInputOBJ);
+	while (feof(modelInputOBJ) == 0) {
+		switch (inputBuffer[0]) {
+		case 'v' :
+			if (inputBuffer[1] == 'n') {
+				//vertex normal
+				vertNormalCount++;
+				heapMemPtr = realloc(meshVertNormal, sizeof(vector) * vertNormalCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex normal info read.\n");
+					goto freeMem;
+				}
+				meshVertNormal = (vector*)heapMemPtr;
+				argCount = sscanf(inputBuffer, "vn %lf %lf %lf", &meshVertNormal[vertNormalCount - 1].x, &meshVertNormal[vertNormalCount - 1].y, &meshVertNormal[vertNormalCount - 1].z);
+				if (argCount != 3) {
+					printf("error while reading vertex normals from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			else if (inputBuffer[1] == 't') {
+				//vertex texture coordinates
+				vertTextureCount++;
+				heapMemPtr = realloc(meshVertTexture, sizeof(UV) * vertTextureCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex texture info read.\n");
+					goto freeMem;
+				}
+				meshVertTexture = (UV*)heapMemPtr;
+				meshVertTexture[vertTextureCount - 1].v = 0;
+				meshVertTexture[vertTextureCount - 1].w = 0;
+				argCount = sscanf(inputBuffer, "vt %lf %lf %lf", &meshVertTexture[vertTextureCount - 1].u, &meshVertTexture[vertTextureCount - 1].v, &meshVertTexture[vertTextureCount - 1].w);
+				if (argCount != 1 && argCount != 2 && argCount != 3) {
+					printf("error while reading vertex texture coordinates from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			else {
+				//vertex
+				vertexCount++;
+				heapMemPtr = realloc(meshVertex, sizeof(vector) * vertexCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex info read\n");
+					goto freeMem;
+				}
+				meshVertex = (vector*)heapMemPtr;
+				argCount = sscanf(inputBuffer, "v %lf %lf %lf", &meshVertex[vertexCount - 1].x, &meshVertex[vertexCount - 1].y, &meshVertex[vertexCount - 1].z);
+				if (argCount != 3) {
+					printf("error while reading vertex coordinates from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			break;
+		case 'f' :
+			//face
+			sceneObject[objectCount - 1].faceCount++;
+			heapMemPtr = realloc(sceneObject[objectCount - 1].mesh, sizeof(face) * sceneObject[objectCount - 1].faceCount);
+			if (heapMemPtr == NULL) {
+				printf("error while reallocating memory for mesh face info read\n");
+				goto freeMem;
+			}
+			sceneObject[objectCount - 1].mesh = (face*)heapMemPtr;
+			sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1].point = (unsigned int*)malloc(0);
+			sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1].texture = (unsigned int*)malloc(0);
+			sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1].normal = (unsigned int*)malloc(0);
+			inpBufferCursor = 1;
+			indexType = 0;
+			while (inputBuffer[inpBufferCursor] == ' ')
+				inpBufferCursor++;
+			sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1].vertCount = 0;
+			while (inputBuffer[inpBufferCursor] != '\0') {
+				if (inputBuffer[inpBufferCursor] == '/') {
+					indexType++;
+					inpBufferCursor++;
+				}
+				else if (inputBuffer[inpBufferCursor] <= 57 && inputBuffer[inpBufferCursor] >= 48) {
+					memset(indexBuffer, 0, sizeof(indexBuffer));
+					indexBufferCursor = 0;
+					while (inputBuffer[inpBufferCursor] <= 57 && inputBuffer[inpBufferCursor] >= 48) {
+						indexBuffer[indexBufferCursor] = inputBuffer[inpBufferCursor];
+						indexBufferCursor++;
+						inpBufferCursor++;
+					}
+					if (sscanf(indexBuffer, "%d", &vertAttribute[indexType]) != 1) {
+						vertAttribute[indexType] = 0;
+					}
+				}
+				else {
+					sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1].vertCount++;
+					vertIndices(&(sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1]), vertAttribute, vertexCount);
+					indexType = 0;
+					while (inputBuffer[inpBufferCursor] == ' ')
+						inpBufferCursor++;
+					if (inputBuffer[inpBufferCursor] == '\n') {
+						break;
+					}
+				}
+			}
+			break;
+		case 'o':
+			//object
+			objectCount++;
+			heapMemPtr = realloc(sceneObject, sizeof(object) * objectCount);
+			if (heapMemPtr == NULL) {
+				printf("error while allocating memory for sceneObjects\n");
+				goto freeMem;
+			}
+			sceneObject = (object*)heapMemPtr;
+			inpBufferCursor = 2;
+			sceneObject[objectCount - 1].faceCount = 0;
+			sceneObject[objectCount - 1].shadeSmooth = false;
+			sceneObject[objectCount - 1].name = (char*)malloc(0);
+			sceneObject[objectCount - 1].mesh = (face*)malloc(0);
+			while (inputBuffer[inpBufferCursor] != '\n') {
+				heapMemPtr = realloc(sceneObject[objectCount - 1].name, sizeof(char) * (inpBufferCursor - 1));
+				if (heapMemPtr == NULL) {
+					printf("error while allocating memory for object name parsing.\n");
+					goto freeMem;
+				}
+				sceneObject[objectCount - 1].name = (char*)heapMemPtr;
+				sceneObject[objectCount - 1].name[inpBufferCursor - 2] = inputBuffer[inpBufferCursor];
+				inpBufferCursor++;
+			}
+			break;
+		case 's':
+			//shade smooth
+			argCount = sscanf(inputBuffer, "s %d", &(sceneObject[objectCount - 1].shadeSmooth));
+			if (argCount != 1) {
+				printf("error while reading shade smooth options from provided obj file. the file may be damaged or corrupted.\n");
+				goto freeMem;
+			}
+			break;
+		default :
+			break;
+		}
+		fgets(inputBuffer, 256, modelInputOBJ);
+	}
+
+	objParsingEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	//perspectives ect initialization
+	perspDist = cameraScale / (2 * tan(FOV / 2));
+	printf("perspDist: %lf units\n", perspDist);
+	perspLV.z = perspDist;
+	heapMemPtr = realloc(projectedVector, sizeof(vector) * vertexCount);
+	if (heapMemPtr == NULL) {
+		printf("error while allocating memory for projectedVector.\n");
+		goto freeMem;
+	}
+	projectedVector = (vector*)heapMemPtr;
+	heapMemPtr = realloc(screenspaceXY, sizeof(XY) * vertexCount);
+	if (heapMemPtr == NULL) {
+		printf("error while allocating memory for screenspaceXY\n");
+		goto freeMem;
+	}
+	screenspaceXY = (XY*)heapMemPtr;
+	for (int i = 0; i < vertexCount; i++) {
+		vectorBuffer = vectorScale(-1 * perspDist / (meshVertex[i].z - perspDist), vectorSubtract(vectorAdd(meshVertex[i], vectorSubtract(worldOriginLV, cameraLV)), perspLV));
+		//vectorBuffer.x - perspDist = error amount
+		projectedVector[i].x = vectorBuffer.x * 100 + widthHalf;
+		projectedVector[i].y = vectorBuffer.y * 100 + heightHalf;
+		projectedVector[i].z = vectorBuffer.z;
+		screenspaceXY[i].x = (unsigned int)projectedVector[i].x;
+		screenspaceXY[i].y = (unsigned int)projectedVector[i].y;
+	}
+	for (int tarObj = 0; tarObj < objectCount; tarObj++) {
+		for (int tarFace = 0; tarFace < sceneObject[tarObj].faceCount; tarFace++) {
+			drawFace(render, sceneObject[tarObj].mesh[tarFace], screenspaceXY, colorPicker);
+		}
+	}
+
+	vectorCalcEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	//writing whats in array 'render' to the actual file
+	for (int y = height - 1; y >= 0; y--) {
+		for (int x = 0; x < width; x++) {
+			fprintfRGB(renderResult, render[x][y].r, render[x][y].g, render[x][y].b);
+		}
+		fputc('\n', renderResult);
+	}
+
+freeMem:
+	fclose(modelInputOBJ);
+	fclose(renderResult);
+	free(render);
+	free(meshVertex);
+	free(meshVertNormal);
+	free(meshVertTexture);
+	free(projectedVector);
+	free(screenspaceXY);
+	for (int tarObj = 0; tarObj < objectCount; tarObj++) {
+		free(sceneObject[tarObj].name);
+		for (int tarFace = 0; tarFace < sceneObject[tarObj].faceCount; tarFace++) {
+			free(sceneObject[tarObj].mesh[tarFace].point);
+			free(sceneObject[tarObj].mesh[tarFace].texture);
+			free(sceneObject[tarObj].mesh[tarFace].normal);
+		}
+		free(sceneObject[tarObj].mesh);
+	}
+	free(sceneObject);
+
+	endEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	printf(".obj file parsing: %lf\nvector calculation: %lf\nwritting the result to file: %lf\nTOTAL TIME: %lf\n", objParsingEXECTIME - startEXECTIME, vectorCalcEXECTIME - objParsingEXECTIME, endEXECTIME - vectorCalcEXECTIME, endEXECTIME - startEXECTIME);
+	return;
+}

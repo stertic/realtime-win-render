@@ -1,0 +1,449 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <math.h>
+#pragma warning ( disable : 4996 )
+//make sure to use scanf_s for %c or %s though
+
+typedef struct {
+	unsigned char r, g, b;
+	float h, s, v;
+} RGB;
+
+typedef struct {
+	unsigned int x, y;
+} XY;
+
+//child function of openPPM
+//functions as fgets but skips lines denoted with ppm style '#' character
+void skipComment(char* buffer, int maxLen, FILE* input) {
+	do {
+		fgets(buffer, maxLen, input);
+	} while (buffer[0] == '#' && feof(input) == 0);
+	return;
+}
+
+int openPPM(FILE* input, XY* resolution) {
+	char readBuffer[512] = { 0 };
+	int inpX = 0, inpY = 0, maxColVal = 255;
+	//48 = 0
+	//first 'magic number' skip (P3)
+	skipComment(readBuffer, 100, input);
+	if (readBuffer[0] != 'P' || readBuffer[1] != '3') {
+		printf("the sorter does not support PPM formatting other than P3(ascii encoding). given formatting: %c%c\n", readBuffer[0], readBuffer[1]);
+		return -2;
+	}
+	
+	//reading resolution
+	skipComment(readBuffer, 100, input);
+	if (sscanf(readBuffer, "%d %d", &inpX, &inpY) != 2) {
+		printf("failed to retrieve resolution. ppm file does not state resolution in two integers\n");
+		return -1;
+	}
+
+	//reading color max value
+	skipComment(readBuffer, 100, input);
+	if (sscanf(readBuffer, "%d", &maxColVal) != 1) {
+		printf("failed to max color value. ppm file does not state max color value with a single integer\n");
+		return -1;
+	}
+	if (maxColVal > 255) {
+		printf("the sorter does not support color ranges over 256. given ppm file's color range: %d\n", maxColVal);
+		return -2;
+	}
+
+	resolution->x = inpX;
+	resolution->y = inpY;
+	return 0;
+}
+
+//child function of readPPM
+//accepts pointers to three unsorted uchar values and sorts them
+void sortUchar3(unsigned char* high, unsigned char* mid, unsigned char* low) {
+	if (*high < *mid) {
+		//swapping elements with XOR
+		*high ^= *mid;
+		*mid ^= *high;
+		*high ^= *mid;
+	}
+	if (*high < *low) {
+		*high ^= *low;
+		*low ^= *high;
+		*high ^= *low;
+	}
+	if (*mid < *low) {
+		*mid ^= *low;
+		*low ^= *mid;
+		*mid ^= *low;
+	}
+	return;
+}
+
+int readPPM(FILE* input, RGB** grid, XY resolution) {
+	unsigned char min, mid, max;
+	int totalCount = 0, scanfArgc;
+	RGB* gridPtr;
+	do {
+		gridPtr = &grid[totalCount % resolution.x][totalCount / resolution.x];
+		scanfArgc = fscanf(input, "%hhd %hhd %hhd", &gridPtr->r, &gridPtr->g, &gridPtr->b);
+		max = gridPtr->r;
+		mid = gridPtr->g;
+		min = gridPtr->b;
+		sortUchar3(&max, &mid, &min);
+		if (max == min) {
+			gridPtr->h = 0;
+		}
+		else if (gridPtr->r == max) {
+			gridPtr->h = ((float)gridPtr->g - (float)gridPtr->b) / (float)(max - min);
+		}
+		else if (gridPtr->g == max) {
+			gridPtr->h = ((float)gridPtr->g - (float)gridPtr->b) / (float)(max - min);
+			gridPtr->h += 2;
+		}
+		else if (gridPtr->b == max) {
+			gridPtr->h = ((float)gridPtr->g - (float)gridPtr->b) / (float)(max - min);
+			gridPtr->h += 4;
+		}
+		gridPtr->h *= 60;
+
+		if (max == 0)
+			gridPtr->s = 0;
+		else
+			gridPtr->s = (float)(max - min) / (float)max;
+
+		gridPtr->v = (float)max / 255.f;
+		totalCount++;
+	} while (feof(input) == 0 && scanfArgc == 3);
+	return 0;
+}
+
+//prints rgb values to provided stream
+//created because fprintf was slower
+void fprintfRGB(FILE* stream, unsigned char red, unsigned char green, unsigned char blue) {
+	fputc((red / 100) + '0', stream);
+	fputc(((red / 10) % 10) + '0', stream);
+	fputc((red % 10) + '0', stream);
+	fputc(' ', stream);
+
+	fputc((green / 100) + '0', stream);
+	fputc(((green / 10) % 10) + '0', stream);
+	fputc((green % 10) + '0', stream);
+	fputc(' ', stream);
+
+	fputc((blue / 100) + '0', stream);
+	fputc(((blue / 10) % 10) + '0', stream);
+	fputc((blue % 10) + '0', stream);
+	fputc('\t', stream);
+	return;
+}
+
+//child function of pixelSort
+int mergeSort(float* inpArray, int length) {
+	//runLen in the buffer(where merged results is to be written) = runLen of input * 2
+	//all are indices below
+	//start of scan A target run: runCount * (runLen * 2)(include)
+	//end of scan A target run: runCount * (runLen * 2) + runLen - 1(include), runCount * (runLen * 2) + runLen(exclude last)
+	//start of scan B target run: runCount * (runLen * 2) + runLen(include)
+	//end of scan B target run: runCount * (runLen * 2) + runLen + runLen - 1(include), runCount * (runLen * 2) + runLen + runLen(exclude last)
+	
+	//mathematically factorized alternatives
+	//start A: runCount * runLen * 2
+	//end A: runLen * (runCount * 2 + 1)(exclude last)
+	//start B: runLen * (runCount * 2 + 1)(include)
+	//end B: 2 * runLen * (runCount + 1)(exclude last)
+	//includes for ends are just 1 subtracted from final result
+
+	int runLen = 1, runCount, runACursor, runBCursor, runAEnd, runBEnd, writeCursor;
+	void* pointerSwap;
+	float *bufferWrite = (float*)malloc(sizeof(float) * length), *bufferRead = inpArray;
+	if (bufferWrite == NULL) {
+		printf("failed to allocate memory for buffer within mergeSort\n");
+		free(bufferWrite);
+		return -1;
+	}
+	while (runLen < length) {
+		//layered merges
+		//code for starts and ends of runs are unintuitive. check the explanation. expressions under are mathematically equivalent to said explanation
+		runCount = 0;
+		do {
+			runACursor = runCount * runLen * 2;
+			runBCursor = runLen * (runCount * 2 + 1);
+			runAEnd = runBCursor;
+			runBEnd = runACursor + (2 * runLen);
+			writeCursor = runACursor;
+			if (runAEnd > length - 1) {
+				//triggers merging while's second exit condition, appends runA to end.
+				runBCursor = runBEnd;
+				runAEnd = length;
+			}
+			else if (runBEnd > length - 1) {
+				runBEnd = length;
+			}
+			//merges two adjacent runs
+			while (1) {
+				//exit conditions
+				if (runACursor >= runAEnd) {
+					while (runBCursor < runBEnd) {
+						bufferWrite[writeCursor] = bufferRead[runBCursor];
+						runBCursor++;
+						writeCursor++;
+					}
+					break;
+				}
+				if (runBCursor >= runBEnd) {
+					while (runACursor < runAEnd) {
+						bufferWrite[writeCursor] = bufferRead[runACursor];
+						runACursor++;
+						writeCursor++;
+					}
+					break;
+				}
+				//compare cases
+				if (bufferRead[runACursor] <= bufferRead[runBCursor]) {
+					bufferWrite[writeCursor] = bufferRead[runACursor];
+					runACursor++;
+					writeCursor++;
+				}
+				else {
+					bufferWrite[writeCursor] = bufferRead[runBCursor];
+					runBCursor++;
+					writeCursor++;
+				}
+			}
+			runCount++;
+		} while (runCount * runLen * 2 < length);
+		pointerSwap = (void*)bufferRead;
+		bufferRead = bufferWrite;
+		bufferWrite = (float*)pointerSwap;
+		runLen *= 2;
+	}
+	//supposed to check if elements were last written to inpArray or not
+	//since swap occurs at the end, we need to check if it was written to bufferWrite to check if it was written to bufferRead
+	if (bufferWrite == inpArray) {
+		writeCursor = 0;
+		while (writeCursor < length) {
+			inpArray[writeCursor] = bufferRead[writeCursor];
+			writeCursor++;
+		}
+		free(bufferRead);
+	}
+	else {
+		free(bufferWrite);
+	}
+	return 0;
+}
+
+//modified function of mergeSort
+//takes a pointer to an array of input pixels, pointer to an array of output pixels, and resolution
+//stores sorted data into output array via call by reference
+int pixelSort(RGB* input, RGB* output, int length) {
+	int runLen = 1, runCount, runACursor, runBCursor, runAEnd, runBEnd, writeCursor;
+	void* pointerSwap;
+	RGB* bufferWrite = output, *bufferRead = input;
+	while (runLen < length) {
+		//layered merges
+		//code for starts and ends of runs are unintuitive. check the explanation. expressions under are mathematically equivalent to said explanation
+		runCount = 0;
+		do {
+			runACursor = runCount * runLen * 2;
+			runBCursor = runLen * (runCount * 2 + 1);
+			runAEnd = runBCursor;
+			runBEnd = runACursor + (2 * runLen);
+			writeCursor = runACursor;
+			if (runAEnd > length - 1) {
+				//triggers merging while's second exit condition, appends runA to end.
+				runBCursor = runBEnd;
+				runAEnd = length;
+			}
+			else if (runBEnd > length - 1) {
+				runBEnd = length;
+			}
+			//merges two adjacent runs
+			while (1) {
+				//exit conditions
+				if (runACursor >= runAEnd) {
+					while (runBCursor < runBEnd) {
+						bufferWrite[writeCursor] = bufferRead[runBCursor];
+						runBCursor++;
+						writeCursor++;
+					}
+					break;
+				}
+				if (runBCursor >= runBEnd) {
+					while (runACursor < runAEnd) {
+						bufferWrite[writeCursor] = bufferRead[runACursor];
+						runACursor++;
+						writeCursor++;
+					}
+					break;
+				}
+				//compare cases
+				if (bufferRead[runACursor].v <= bufferRead[runBCursor].v) {
+					bufferWrite[writeCursor] = bufferRead[runACursor];
+					runACursor++;
+					writeCursor++;
+				}
+				else {
+					bufferWrite[writeCursor] = bufferRead[runBCursor];
+					runBCursor++;
+					writeCursor++;
+				}
+			}
+			runCount++;
+		} while (runCount * runLen * 2 < length);
+		pointerSwap = (void*)bufferRead;
+		bufferRead = bufferWrite;
+		bufferWrite = (RGB*)pointerSwap;
+		runLen *= 2;
+	}
+	//supposed to check if elements were last written to inpArray or not
+	//since swap occurs at the end, we need to check if it was written to bufferWrite to check if it was written to bufferRead
+	if (bufferWrite == output) {
+		writeCursor = 0;
+		while (writeCursor < length) {
+			output[writeCursor] = bufferRead[writeCursor];
+			writeCursor++;
+		}
+	}
+	return 0;
+}
+
+int main(void) {
+	clock_t startEXECTIME, headerEXECTIME, memallocEXECTIME, parseEXECTIME, sortEXECTIME, writeEXECTIME;
+	void* castPtr = NULL;
+	XY resolution;
+	FILE* readImg = fopen("Resources\\input.ppm", "rt");
+
+	startEXECTIME = clock();
+	printf("parsing header...");
+
+	if (readImg == NULL) {
+		printf("cannot open input image file\n");
+		return -1;
+	}
+	if (openPPM(readImg, &resolution) != 0) {
+		printf("error while parsing header of ppm file\n");
+		return -1;
+	}
+
+	headerEXECTIME = clock();
+	printf("finished\nexectime: %lf(sec)\n\n", (double)(headerEXECTIME - startEXECTIME) / (double)CLOCKS_PER_SEC);
+	printf("allocating heap memory...");
+
+	RGB** inpGrid = NULL;
+	RGB** outGrid = NULL;
+
+	//inpGrid allocation
+	castPtr = calloc(resolution.x, sizeof(RGB*));
+	if (castPtr == NULL) {
+		printf("error while allocating memory for pointer array of input grid\n");
+		goto freeMem;
+	}
+	inpGrid = (RGB**)castPtr;
+
+	castPtr = calloc(resolution.x * resolution.y, sizeof(RGB));
+	if (castPtr == NULL) {
+		printf("error while allocating memory for hard data of input grid\n");
+		goto freeMem;
+	}
+	for (unsigned int column = 0; column < resolution.x; column++) {
+		inpGrid[column] = (RGB*)castPtr + (column * resolution.y);
+	}
+
+	//outGrid allocation
+	castPtr = calloc(resolution.x, sizeof(RGB*));
+	if (castPtr == NULL) {
+		printf("error while allocating memory for pointer array of output grid\n");
+		goto freeMem;
+	}
+	outGrid = (RGB**)castPtr;
+
+	castPtr = calloc(resolution.x * resolution.y, sizeof(RGB));
+	if (castPtr == NULL) {
+		printf("error while allocating memory for hard data of output grid\n");
+		goto freeMem;
+	}
+	for (unsigned int column = 0; column < resolution.x; column++) {
+		outGrid[column] = (RGB*)castPtr + (column * resolution.y);
+	}
+
+	memallocEXECTIME = clock();
+	printf("finished\nexectime: %lf(sec)\n\n", (double)(memallocEXECTIME - headerEXECTIME) / (double)CLOCKS_PER_SEC);
+	printf("reading RGB data from ppm file...");
+	
+	//read contents of ppm file
+	if (readPPM(readImg, inpGrid, resolution) != 0) {
+		return -1;
+	}
+
+	parseEXECTIME = clock();
+	printf("finished\nexectime: %lf(sec)\n\n", (double)(parseEXECTIME - memallocEXECTIME) / (double)CLOCKS_PER_SEC);
+	printf("sorting pixels...");
+
+	RGB *rowSamplingINP, *rowSamplingOUT;
+
+	castPtr = calloc(resolution.x, sizeof(RGB));
+	if (castPtr == NULL) {
+		printf("error while allocating memory for row sampling input\n");
+		goto freeMem;
+	}
+	rowSamplingINP = (RGB*)castPtr;
+
+	castPtr = calloc(resolution.x, sizeof(RGB));
+	if (castPtr == NULL) {
+		printf("error while allocating memory for row sampling output\n");
+		goto freeMem;
+	}
+	rowSamplingOUT = (RGB*)castPtr;
+
+	for (unsigned int row = 0; row < resolution.y; row++) {
+		unsigned int col = 0, segmentLen = 1;
+		while (col < (int)resolution.x - 1) {
+			rowSamplingINP[segmentLen - 1] = inpGrid[col][row];
+			if (fabsf(inpGrid[col + 1][row].v - inpGrid[col][row].v) > 0.5) {
+				if (segmentLen == 1) {
+					outGrid[col][row] = rowSamplingINP[col];
+					segmentLen = 0;
+				}
+				else {
+
+				}
+			}
+			segmentLen++;
+			col++;
+		}
+		pixelSort(rowSamplingINP, rowSamplingOUT, (int)resolution.x);
+		for (unsigned int col = 0; col < resolution.x; col++) {
+			outGrid[col][row] = rowSamplingOUT[col];
+		}
+	}
+
+	sortEXECTIME = clock();
+	printf("finished\nexectime: %lf(sec)\n\n", (double)(sortEXECTIME - parseEXECTIME) / (double)CLOCKS_PER_SEC);
+	printf("writing result to destination file...");
+
+	FILE* writeImg;
+	castPtr = fopen("Rendered\\render result.ppm", "wt");
+	if (castPtr == NULL) {
+		printf("cannot open output image file\n");
+		return -1;
+	}
+	writeImg = (FILE*)castPtr;
+	fprintf(writeImg, "P3\n%d %d\n255\n", resolution.x, resolution.y);
+	for (unsigned int row = 0; row < resolution.y; row++) {
+		for (unsigned int col = 0; col < resolution.x; col++) {
+			fprintfRGB(writeImg, outGrid[col][row].r, outGrid[col][row].g, outGrid[col][row].b);
+		}
+		fputc('\n', writeImg);
+	}
+
+	writeEXECTIME = clock();
+	printf("finished\nexectime: %lf(sec)\n\n", (double)(writeEXECTIME - sortEXECTIME) / (double)CLOCKS_PER_SEC);
+	printf("finished successfully\n");
+
+freeMem:
+	free(castPtr);
+	free(inpGrid);
+	fclose(readImg);
+	return 0;
+}

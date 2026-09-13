@@ -1,0 +1,885 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdbool.h>
+#include <time.h>
+
+#define width 1280
+#define height 720
+//range of canvas coordinates in code: 0 ~ width - 1, 0 ~ height - 1
+
+//LV = location vector
+//RV = rotation vector, could be unit vector or not a unit vector
+//all vectors are stored in double type
+//all angles are done in radians
+//for pixel coordinates, higher x = right, higher y = down
+
+//rgb are stored in char because it's 1 byte so it's efficient for storing numbers within 0 ~ 255
+//needs to be unsigned or it gives negative rgb values
+typedef struct {
+	unsigned char r;
+	unsigned char b;
+	unsigned char g;
+} RGB;
+
+//screenspace coordinates
+typedef struct {
+	unsigned int x;
+	unsigned int y;
+} XY;
+
+typedef struct {
+	double u;
+	double v;
+	double w;
+} UV;
+
+typedef struct {
+	double x;
+	double y;
+	double z;
+} vector;
+
+//data inside struct 'face' are all indices, NOT LOCATION VECTORS
+//all are pointers pointing to the start of an array of indices
+//negative indices are interpreted into a positive index at reading stage
+//indices start at 1, 0 means unused.
+typedef struct {
+	unsigned int vertCount;
+	unsigned int* point;
+	unsigned int* texture;
+	unsigned int* normal;
+	vector faceNormal;
+	vector geometryCenter;
+	//the indices are in order.
+	//ex) vert normal for point[i] is normal[i].
+} face;
+
+typedef struct {
+	char* name;
+	int faceCount;
+	int shadeSmooth;
+	face* mesh;
+} object;
+
+//basic vector arithmatic function
+//adds two given vectors
+vector vectorAdd(vector vectA, vector vectB) {
+	vector calcResult;
+	calcResult.x = vectA.x + vectB.x;
+	calcResult.y = vectA.y + vectB.y;
+	calcResult.z = vectA.z + vectB.z;
+	return calcResult;
+}
+
+//basic vector arithmatic function
+//subtracts by the second vector from the first vector
+vector vectorSubtract(vector vectA, vector vectB) {
+	vector calcResult;
+	calcResult.x = vectA.x - vectB.x;
+	calcResult.y = vectA.y - vectB.y;
+	calcResult.z = vectA.z - vectB.z;
+	return calcResult;
+}
+
+//basic vector arithmatic function
+//scales a given vector by a scalar
+vector vectorScale(double scalar, vector vect) {
+	vector calcResult;
+	calcResult.x = scalar * vect.x;
+	calcResult.y = scalar * vect.y;
+	calcResult.z = scalar * vect.z;
+	return calcResult;
+}
+
+double dotProduct(vector vectA, vector vectB) {
+	return (vectA.x * vectB.x) + (vectA.y * vectB.y) + (vectA.z * vectB.z);
+}
+
+//slider at 0 returns valA, slider at 1 returns valB
+//unclamped
+//child function for drawTrigBland
+double linInterp(double slider, double valA, double valB) {
+	return valA + (valB - valA) * slider;
+}
+
+//draws line on a 2 dimensional RGB grid. takes screen space coordinates as input
+//last pixel isn't drawn for lessen overlaps
+void drawLine(RGB(*drawTo)[height], unsigned int aX, unsigned int aY, unsigned int bX, unsigned int bY, RGB lineCol) {
+	int cursor, advance;
+	//cursor glides through the chosen axis, couple is the other axis.
+	float couple, slope;
+	//slope is RELATIVE TO MAIN AXIS! it's not always dx/dy
+	if (fabsf((float)(aY - bY) / (float)(aX - bX)) > 1) {
+		//cursor advances in Y direction
+		cursor = aY;
+		if (aY == bY)
+			advance = 0;
+		else
+			advance = (bY - aY) / abs(bY - aY);
+		couple = (float)aX;
+		slope = ((float)(aX - bX) / (float)(aY - bY)) * advance;
+		while (cursor != bY) {
+			if ((int)couple * ((int)couple - width) <= 0 && cursor * (cursor - height) <= 0) {
+				drawTo[(int)couple][cursor] = lineCol;
+			}
+			cursor += advance;
+			couple += slope;
+		}
+	}
+	else {
+		//cursor advances in X direction
+		cursor = aX;
+		if (aX == bX)
+			advance = 0;
+		else
+			advance = (bX - aX) / abs(bX - aX);
+		couple = (float)aY;
+		slope = ((float)(aY - bY) / (float)(aX - bX)) * advance;
+		while (cursor != bX) {
+			if ((int)couple * ((int)couple - width) <= 0 && cursor * (cursor - height) <= 0) {
+				drawTo[cursor][(int)couple] = lineCol;
+			}
+			cursor += advance;
+			couple += slope;
+		}
+	}
+	return;
+}
+
+//child function of drawTrigBland
+//accepts pointers of three for unsorted XY types and sorts them by their x
+//pointA -> highest, pointB -> mid, pointC -> lowest
+void sortTripleX(XY* pointA, XY* pointB, XY* pointC) {
+	XY temp;
+	if (pointA->x < pointB->x) {
+		temp = *pointA;
+		*pointA = *pointB;
+		*pointB = temp;
+	}
+	if (pointA->x < pointC->x) {
+		temp = *pointA;
+		*pointA = *pointC;
+		*pointC = temp;
+	}
+	if (pointB->x < pointC->x) {
+		temp = *pointB;
+		*pointB = *pointC;
+		*pointC = temp;
+	}
+	return;
+}
+
+//child function of drawTrigBland
+//accepts pointers of three for unsorted XY types and sorts them by their y
+//pointA -> highest, pointB -> mid, pointC -> lowest
+void sortTripleY(XY* pointA, XY* pointB, XY* pointC) {
+	XY temp;
+	if (pointA->y < pointB->y) {
+		temp = *pointA;
+		*pointA = *pointB;
+		*pointB = temp;
+	}
+	if (pointA->y < pointC->y) {
+		temp = *pointA;
+		*pointA = *pointC;
+		*pointC = temp;
+	}
+	if (pointB->y < pointC->y) {
+		temp = *pointB;
+		*pointB = *pointC;
+		*pointC = temp;
+	}
+	return;
+}
+
+//child function of drawTrigBland
+//draws a triangle for the lower half(from low to mid) of the triangle
+void firstInterpTrigBland(RGB(*drawTo)[height], XY high, XY mid, XY low, RGB fillCol) {
+	unsigned int scanRow, column;
+	float startScan, endScan, startSlope, endSlope;
+	if (mid.x < linInterp((mid.y - low.y) / (high.y - low.y), low.x, high.x)) {
+		startScan = low.x;
+		endScan = low.x;
+		startSlope = (mid.x - low.x) / (mid.y - low.y);
+		endSlope = (high.x - low.x) / (high.y - low.y);
+		scanRow = low.y;
+		while (scanRow < mid.y) {
+			for (column = (unsigned int)startScan; column <= (unsigned int)endScan; column++)
+				drawTo[column][scanRow] = fillCol;
+			//drawLine(drawTo, startScan, scanRow, endScan, scanRow, fillCol);
+			scanRow++;
+			startScan += startSlope;
+			endScan += endSlope;
+		}
+	}
+	else {
+		startScan = low.x;
+		endScan = low.x;
+		startSlope = (high.x - low.x) / (high.y - low.y);
+		endSlope = (mid.x - low.x) / (mid.y - low.y);
+		scanRow = low.y;
+		while (scanRow < mid.y) {
+			for (column = startScan; column <= endScan; column++)
+				drawTo[column][scanRow] = fillCol;
+			//drawLine(drawTo, startScan, scanRow, endScan, scanRow, fillCol);
+			scanRow++;
+			startScan += startSlope;
+			endScan += endSlope;
+		}
+	}
+}
+
+//child function of drawTrigBland
+//draws a triangle for the upper half(from mid til high) of the triangle
+void secondInterpTrigBland(RGB(*drawTo)[height], XY high, XY mid, XY low, RGB fillCol) {
+	unsigned int scanRow, column;
+	float startScan, endScan, startSlope, endSlope;
+	float interpolate = (float)linInterp((mid.y - low.y) / (high.y - low.y), low.x, high.x);
+	scanRow = mid.y;
+	if (mid.x < interpolate) {
+		startSlope = (high.x - mid.x) / (high.y - mid.y);
+		endSlope = (high.x - interpolate) / (high.y - mid.y);
+		startScan = mid.x;
+		endScan = interpolate;
+		while (scanRow < high.y) {
+			for (column = (unsigned int)startScan; column < (unsigned int)endScan; column++)
+				drawTo[column][scanRow] = fillCol;
+			scanRow++;
+			startScan += startSlope;
+			endScan += endSlope;
+		}
+	}
+	else {
+		startSlope = (high.x - interpolate) / (high.y - mid.y);
+		endSlope = (high.x - mid.x) / (high.y - mid.y);
+		startScan = interpolate;
+		endScan = mid.x;
+		while (scanRow < high.y) {
+			for (column = (unsigned int)startScan; column < (unsigned int)endScan; column++)
+				drawTo[column][scanRow] = fillCol;
+			scanRow++;
+			startScan += startSlope;
+			endScan += endSlope;
+		}
+	}
+}
+
+//side outline pixels are drawn, the last side of triangle isn't drawn to lessen overlaps
+void drawTrigBland(RGB(*drawTo)[height], XY pointA, XY pointB, XY pointC, RGB fillCol) {
+	XY high = pointA, mid = pointB, low = pointC;
+	int approach;
+	unsigned int scanRow = low.y, column;
+	float startScan, endScan, startSlope, endSlope;
+	//sorting in height - linescans scans through the Y axis, always.
+	sortTripleY(&high, &mid, &low);
+	//edgecases management - preventing division by 0
+	//all three points lie on a single line
+	if (low.y == high.y) {
+		sortTripleX(&high, &mid, &low);
+		for (column = low.x; column <= high.x; column++)
+			drawTo[column][scanRow] = fillCol;
+	}
+	//skips first interpolation, draws a line for the first interpolation instead
+	else if (mid.y == low.y) {
+		drawLine(drawTo, mid.x, mid.y, low.x, low.y, fillCol);
+		secondInterpTrigBland(drawTo, high, mid, low, fillCol);
+	}
+	//skips second interpolation, draws a line for the second interpolation instead
+	else if (mid.y == high.y) {
+		firstInterpTrigBland(drawTo, high, mid, low, fillCol);
+		drawLine(drawTo, mid.x, mid.y, high.x, high.y, fillCol);
+	}
+	else {
+		firstInterpTrigBland(drawTo, high, mid, low, fillCol);
+		secondInterpTrigBland(drawTo, high, mid, low, fillCol);
+	}
+	return;
+}
+
+
+//PLACEHOLDER, VERY TEMPORARY
+//made for debugging purposes and debugging purposes only
+void drawCircle(RGB(*drawTo)[height], int screenX, int screenY, RGB dotCol) {
+	drawTo[screenX][screenY].r = dotCol.r;
+	drawTo[screenX][screenY].g = dotCol.g;
+	drawTo[screenX][screenY].b = dotCol.b;
+
+	drawTo[screenX + 1][screenY].r = dotCol.r;
+	drawTo[screenX + 1][screenY].g = dotCol.g;
+	drawTo[screenX + 1][screenY].b = dotCol.b;
+
+	drawTo[screenX - 1][screenY].r = dotCol.r;
+	drawTo[screenX - 1][screenY].g = dotCol.g;
+	drawTo[screenX - 1][screenY].b = dotCol.b;
+
+	drawTo[screenX][screenY + 1].r = dotCol.r;
+	drawTo[screenX][screenY + 1].g = dotCol.g;
+	drawTo[screenX][screenY + 1].b = dotCol.b;
+
+	drawTo[screenX][screenY - 1].r = dotCol.r;
+	drawTo[screenX][screenY - 1].g = dotCol.g;
+	drawTo[screenX][screenY - 1].b = dotCol.b;
+	return;
+}
+
+void drawFaceOutline(RGB(*drawTo)[height], face targetFace, XY* screenspaceXY, RGB colorPicker) {
+	XY screenspaceStart, screenspaceEnd;
+	unsigned int screenLastPoint = targetFace.point[targetFace.vertCount - 1];
+	for (int tarVert = 0; tarVert < (int)(targetFace.vertCount) - 1; tarVert++) {
+		screenspaceStart = screenspaceXY[targetFace.point[tarVert] - 1];
+		screenspaceEnd = screenspaceXY[targetFace.point[tarVert + 1] - 1];
+		drawLine(drawTo, screenspaceStart.x, screenspaceStart.y, screenspaceEnd.x, screenspaceEnd.y, colorPicker);
+	}
+	drawLine(drawTo, screenspaceXY[screenLastPoint - 1].x, screenspaceXY[screenLastPoint - 1].y, screenspaceXY[targetFace.point[0] - 1].x, screenspaceXY[targetFace.point[0] - 1].y, colorPicker);
+	return;
+}
+
+//function to handle safer dynamic memory reallocation for index arrays
+//reallocates data at memBlock then appends data(index) onto it.
+void addVertAttribute(unsigned int** memBlock, int data, int wrapAround, unsigned int vertCount) {
+	unsigned int* tempPtr = (unsigned int*)realloc(*memBlock, sizeof(unsigned int) * vertCount);
+	if (tempPtr == NULL) {
+		printf("failed to reallocate memory within addVertAttribute.\n! memory was not freed instatly afterwards !\n");
+		return;
+	}
+	*memBlock = tempPtr;
+	if (data >= 0)
+		(*memBlock)[vertCount - 1] = data;
+	else
+		(*memBlock)[vertCount - 1] = wrapAround + data + 1;
+	return;
+}
+
+//prints rgb values to provided stream
+//created because fprintf was slower
+void fprintfRGB(FILE* stream, unsigned char red, unsigned char green, unsigned char blue) {
+	fputc((red / 100) + '0', stream);
+	fputc(((red / 10) % 10) + '0', stream);
+	fputc((red % 10) + '0', stream);
+	fputc(' ', stream);
+
+	fputc((green / 100) + '0', stream);
+	fputc(((green / 10) % 10) + '0', stream);
+	fputc((green % 10) + '0', stream);
+	fputc(' ', stream);
+
+	fputc((blue / 100) + '0', stream);
+	fputc(((blue / 10) % 10) + '0', stream);
+	fputc((blue % 10) + '0', stream);
+	fputc('\t', stream);
+	return;
+}
+
+//this feature is mostly implemented for debugging purposes.
+//it is not intended to be used in final product.
+void renderLine(RGB(*drawTo)[height], double perspDist, vector vertexA, vector vertexB, vector camTransformVector, vector perspLV, RGB colorPicker) {
+	vector projectedVectorA, projectedVectorB;
+	int screenAx, screenAy, screenBx, screenBy;
+	int widthHalf = (int)(width / 2), heightHalf = (int)(height / 2);
+	projectedVectorA = vectorScale(-1 * perspDist / (vertexA.z - perspDist), vectorSubtract(vectorAdd(vertexA, camTransformVector), perspLV));
+	projectedVectorB = vectorScale(-1 * perspDist / (vertexB.z - perspDist), vectorSubtract(vectorAdd(vertexB, camTransformVector), perspLV));
+	screenAx = (int)(projectedVectorA.x * 100 + widthHalf);
+	screenAy = (int)(projectedVectorA.y * 100 + heightHalf);
+	screenBx = (int)(projectedVectorB.x * 100 + widthHalf);
+	screenBy = (int)(projectedVectorB.y * 100 + heightHalf);
+	drawLine(drawTo, screenAx, screenAy, screenBx, screenBy, colorPicker);
+	return;
+}
+
+//this feature is mostly implemented for debugging purposes.
+//it is not intended to be used in final product.
+void renderPoint(RGB(*drawTo)[height], double perspDist, vector vertex, vector camTransformVector, vector perspLV, RGB colorPicker) {
+	vector projectedVector;
+	int screenX, screenY;
+	int widthHalf = (int)(width / 2), heightHalf = (int)(height / 2);
+	projectedVector = vectorScale(-1 * perspDist / (vertex.z - perspDist), vectorSubtract(vectorAdd(vertex, camTransformVector), perspLV));
+	screenX = (int)(projectedVector.x * 100 + widthHalf);
+	screenY = (int)(projectedVector.y * 100 + heightHalf);
+	drawCircle(drawTo, screenX, screenY, colorPicker);
+	return;
+}
+
+int parseObj(FILE* modelInputOBJ) {
+	char inputBuffer[256];
+	fgets(inputBuffer, 256, modelInputOBJ);
+	while (feof(modelInputOBJ) == 0) {
+		switch (inputBuffer[0]) {
+		case 'v':
+			if (inputBuffer[1] == 'n') {
+				//vertex normal
+				vertNormalCount++;
+				heapMemPtr = realloc(meshVertNormal, sizeof(vector) * vertNormalCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex normal info read.\n");
+					goto freeMem;
+				}
+				meshVertNormal = (vector*)heapMemPtr;
+				argCount = sscanf(inputBuffer, "vn %lf %lf %lf", &meshVertNormal[vertNormalCount - 1].x, &meshVertNormal[vertNormalCount - 1].y, &meshVertNormal[vertNormalCount - 1].z);
+				if (argCount != 3) {
+					printf("error while reading vertex normals from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			else if (inputBuffer[1] == 't') {
+				//vertex texture coordinates
+				vertTextureCount++;
+				heapMemPtr = realloc(meshVertTexture, sizeof(UV) * vertTextureCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex texture info read.\n");
+					goto freeMem;
+				}
+				meshVertTexture = (UV*)heapMemPtr;
+				meshVertTexture[vertTextureCount - 1].v = 0;
+				meshVertTexture[vertTextureCount - 1].w = 0;
+				argCount = sscanf(inputBuffer, "vt %lf %lf %lf", &meshVertTexture[vertTextureCount - 1].u, &meshVertTexture[vertTextureCount - 1].v, &meshVertTexture[vertTextureCount - 1].w);
+				if (argCount != 1 && argCount != 2 && argCount != 3) {
+					printf("error while reading vertex texture coordinates from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			else {
+				//vertex
+				vertexCount++;
+				heapMemPtr = realloc(meshVertex, sizeof(vector) * vertexCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex info read\n");
+					goto freeMem;
+				}
+				meshVertex = (vector*)heapMemPtr;
+				argCount = sscanf(inputBuffer, "v %lf %lf %lf", &meshVertex[vertexCount - 1].x, &meshVertex[vertexCount - 1].y, &meshVertex[vertexCount - 1].z);
+				if (argCount != 3) {
+					printf("error while reading vertex coordinates from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			break;
+		case 'f':
+			//face
+			sceneObject[objectCount - 1].faceCount++;
+			heapMemPtr = realloc(sceneObject[objectCount - 1].mesh, sizeof(face) * sceneObject[objectCount - 1].faceCount);
+			if (heapMemPtr == NULL) {
+				printf("error while reallocating memory for mesh face info read\n");
+				goto freeMem;
+			}
+			sceneObject[objectCount - 1].mesh = (face*)heapMemPtr;
+
+			//initializations
+			currentFace = &sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1];
+			currentFace->point = (unsigned int*)malloc(sizeof(unsigned int));
+			currentFace->texture = (unsigned int*)malloc(sizeof(unsigned int));
+			currentFace->normal = (unsigned int*)malloc(sizeof(unsigned int));
+			currentFace->geometryCenter = zeroVector;
+			currentFace->faceNormal = zeroVector;
+			inpBufferCursor = 1;
+			indexType = 0;
+			while (inputBuffer[inpBufferCursor] == ' ')
+				inpBufferCursor++;
+			currentFace->vertCount = 0;
+			//if number wasn't read, represents it unused by leaving the values 0
+			vertAttribute[0] = 0;
+			vertAttribute[1] = 0;
+			vertAttribute[2] = 0;
+			//start of proper parsing of current line
+			while (inputBuffer[inpBufferCursor] != '\0') {
+				//check if cursor is at dividing character
+				if (inputBuffer[inpBufferCursor] == '/') {
+					indexType++;
+					inpBufferCursor++;
+				}
+				//check if cursor is at a number
+				else if (inputBuffer[inpBufferCursor] <= 57 && inputBuffer[inpBufferCursor] >= 48) {
+					//manual integer read to buffer, and then read with sscanf for stability
+					memset(indexBuffer, 0, sizeof(indexBuffer));
+					indexBufferCursor = 0;
+					while (inputBuffer[inpBufferCursor] <= 57 && inputBuffer[inpBufferCursor] >= 48) {
+						indexBuffer[indexBufferCursor] = inputBuffer[inpBufferCursor];
+						indexBufferCursor++;
+						inpBufferCursor++;
+					}
+					if (sscanf(indexBuffer, "%d", &vertAttribute[indexType]) != 1) {
+						printf("erroneous data in index buffer while parsing obj file. the file may be damaged or corrupted.\n");
+						goto freeMem;
+					}
+					if (indexType == 0) {
+						//if index type is vertex position
+						currentFace->geometryCenter = vectorAdd(currentFace->geometryCenter, meshVertex[vertAttribute[indexType] - 1]);
+					}
+					else if (indexType == 2) {
+						//if index type is vertex normal
+						currentFace->faceNormal = vectorAdd(currentFace->faceNormal, meshVertNormal[vertAttribute[indexType] - 1]);
+					}
+				}
+				//if cursor points to neither a number nor a dividing char
+				//endline concludes face data read
+				else {
+					currentFace->vertCount += 1;
+					//wavefront faces are in order of location - texture - normals
+					addVertAttribute(&currentFace->point, vertAttribute[0], vertexCount, currentFace->vertCount);
+					addVertAttribute(&currentFace->texture, vertAttribute[1], vertexCount, currentFace->vertCount);
+					addVertAttribute(&currentFace->normal, vertAttribute[2], vertexCount, currentFace->vertCount);
+					indexType = 0;
+					if ((inputBuffer[inpBufferCursor] > 57 || inputBuffer[inpBufferCursor] < 48) && inputBuffer[inpBufferCursor] != ' ' && inputBuffer[inpBufferCursor] == '/') {
+						printf("erroneous data in index buffer while parsing obj file. the file may be damaged or corrupted.\n");
+						goto freeMem;
+					}
+					while (inputBuffer[inpBufferCursor] == ' ')
+						inpBufferCursor++;
+					if (inputBuffer[inpBufferCursor] == '\n') {
+						currentFace->geometryCenter = vectorScale(1 / (double)(currentFace->vertCount), currentFace->geometryCenter);
+						currentFace->faceNormal = vectorScale(1 / (double)(currentFace->vertCount), currentFace->faceNormal);
+						break;
+					}
+				}
+			}
+			break;
+		case 'o':
+			//object
+			objectCount++;
+			heapMemPtr = realloc(sceneObject, sizeof(object) * objectCount);
+			if (heapMemPtr == NULL) {
+				printf("error while allocating memory for sceneObjects\n");
+				goto freeMem;
+			}
+			sceneObject = (object*)heapMemPtr;
+			inpBufferCursor = 2;
+			sceneObject[objectCount - 1].faceCount = 0;
+			sceneObject[objectCount - 1].shadeSmooth = 0;
+			sceneObject[objectCount - 1].name = (char*)malloc(sizeof(char*));
+			sceneObject[objectCount - 1].mesh = (face*)malloc(sizeof(face*));
+			while (inputBuffer[inpBufferCursor] != '\n') {
+				heapMemPtr = realloc(sceneObject[objectCount - 1].name, sizeof(char) * (inpBufferCursor - 1));
+				if (heapMemPtr == NULL) {
+					printf("error while allocating memory for object name parsing.\n");
+					goto freeMem;
+				}
+				sceneObject[objectCount - 1].name = (char*)heapMemPtr;
+				sceneObject[objectCount - 1].name[inpBufferCursor - 2] = inputBuffer[inpBufferCursor];
+				inpBufferCursor++;
+			}
+			break;
+		case 's':
+			//shade smooth
+			argCount = sscanf(inputBuffer, "s %d", &(sceneObject[objectCount - 1].shadeSmooth));
+			if (argCount != 1) {
+				printf("error while reading shade smooth options from provided obj file. the file may be damaged or corrupted.\n");
+				goto freeMem;
+			}
+			break;
+		default:
+			break;
+		}
+		fgets(inputBuffer, 256, modelInputOBJ);
+	}
+	return 0;
+}
+
+//FOV is measured on the X axis
+//size of projection plane: X = cameraScale, Y = (resolutionY / resolutionX) * cameraScale
+void main() {
+	//parser variables
+	void* heapMemPtr;
+	int argCount;
+	vector vectorBuffer;
+	char inputBuffer[256], indexBuffer[32];
+	char outputFilename[100];
+
+	//global counters for index assigning
+	int vertexCount = 0, vertNormalCount = 0, vertTextureCount = 0, objectCount = 0, vertAttribute[3], indexType;
+
+	//object info
+	vector(*meshVertex) = (vector*)malloc(sizeof(vector));
+	vector(*meshVertNormal) = (vector*)malloc(sizeof(vector));
+	UV(*meshVertTexture) = (UV*)malloc(sizeof(UV));
+	face* currentFace;
+
+	//rendering data
+	int widthHalf = width / 2, heightHalf = height / 2, inpBufferCursor, indexBufferCursor;
+	double FOV = 2.0943951023931954, cameraScale = 50, perspDist;
+	const vector worldOriginLV = { .x = 0, .y = 0, .z = 0 };
+	const vector zeroVector = { .x = 0, .y = 0, .z = 0 };
+	object(*sceneObject) = (object*)malloc(sizeof(object));
+	XY(*screenspaceXY) = (XY*)malloc(sizeof(XY));
+	RGB(*render)[height] = (RGB(*)[height])malloc(sizeof(RGB) * width * height);
+	RGB colorPicker = { .r = 255, .b = 255, .g = 255 };
+	vector cameraLV = { .x = 0, .y = 0, .z = 0 }, cameraRV = { .x = 0, .y = 0, .z = -1 };
+	vector perspLV = { .x = 0, .y = 0, .z = 0 };
+	vector camTransformVector;
+
+	double startEXECTIME = 0, objParsingEXECTIME = 0, vectorCalcEXECTIME = 0, endEXECTIME = 0;
+	startEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	FILE* modelInputOBJ = fopen("resources\\test cube.obj", "rt");
+	if (modelInputOBJ == NULL) {
+		printf("input .obj file not found\n");
+		goto freeMem;
+	}
+	sprintf(outputFilename, "resources\\render result.ppm");
+	FILE* renderResult = fopen(outputFilename, "wt");
+	//initialize ppm
+	fprintf(renderResult, "P3\n%d %d\n255\n", width, height);
+	for (int y = 0; y < height; y++) {
+		for (int x = 0; x < width; x++) {
+			render[x][y].r = 50;
+			render[x][y].b = 50;
+			render[x][y].g = 50;
+		}
+	}
+	//obj parsing
+	fgets(inputBuffer, 256, modelInputOBJ);
+	while (feof(modelInputOBJ) == 0) {
+		switch (inputBuffer[0]) {
+		case 'v' :
+			if (inputBuffer[1] == 'n') {
+				//vertex normal
+				vertNormalCount++;
+				heapMemPtr = realloc(meshVertNormal, sizeof(vector) * vertNormalCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex normal info read.\n");
+					goto freeMem;
+				}
+				meshVertNormal = (vector*)heapMemPtr;
+				argCount = sscanf(inputBuffer, "vn %lf %lf %lf", &meshVertNormal[vertNormalCount - 1].x, &meshVertNormal[vertNormalCount - 1].y, &meshVertNormal[vertNormalCount - 1].z);
+				if (argCount != 3) {
+					printf("error while reading vertex normals from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			else if (inputBuffer[1] == 't') {
+				//vertex texture coordinates
+				vertTextureCount++;
+				heapMemPtr = realloc(meshVertTexture, sizeof(UV) * vertTextureCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex texture info read.\n");
+					goto freeMem;
+				}
+				meshVertTexture = (UV*)heapMemPtr;
+				meshVertTexture[vertTextureCount - 1].v = 0;
+				meshVertTexture[vertTextureCount - 1].w = 0;
+				argCount = sscanf(inputBuffer, "vt %lf %lf %lf", &meshVertTexture[vertTextureCount - 1].u, &meshVertTexture[vertTextureCount - 1].v, &meshVertTexture[vertTextureCount - 1].w);
+				if (argCount != 1 && argCount != 2 && argCount != 3) {
+					printf("error while reading vertex texture coordinates from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			else {
+				//vertex
+				vertexCount++;
+				heapMemPtr = realloc(meshVertex, sizeof(vector) * vertexCount);
+				if (heapMemPtr == NULL) {
+					printf("error while reallocating memory for mesh vertex info read\n");
+					goto freeMem;
+				}
+				meshVertex = (vector*)heapMemPtr;
+				argCount = sscanf(inputBuffer, "v %lf %lf %lf", &meshVertex[vertexCount - 1].x, &meshVertex[vertexCount - 1].y, &meshVertex[vertexCount - 1].z);
+				if (argCount != 3) {
+					printf("error while reading vertex coordinates from provided obj file. the file may be damaged or corrupted.\n");
+					goto freeMem;
+				}
+			}
+			break;
+		case 'f' :
+			//face
+			sceneObject[objectCount - 1].faceCount++;
+			heapMemPtr = realloc(sceneObject[objectCount - 1].mesh, sizeof(face) * sceneObject[objectCount - 1].faceCount);
+			if (heapMemPtr == NULL) {
+				printf("error while reallocating memory for mesh face info read\n");
+				goto freeMem;
+			}
+			sceneObject[objectCount - 1].mesh = (face*)heapMemPtr;
+
+			//initializations
+			currentFace = &sceneObject[objectCount - 1].mesh[sceneObject[objectCount - 1].faceCount - 1];
+			currentFace->point = (unsigned int*)malloc(sizeof(unsigned int));
+			currentFace->texture = (unsigned int*)malloc(sizeof(unsigned int));
+			currentFace->normal = (unsigned int*)malloc(sizeof(unsigned int));
+			currentFace->geometryCenter = zeroVector;
+			currentFace->faceNormal = zeroVector;
+			inpBufferCursor = 1;
+			indexType = 0;
+			while (inputBuffer[inpBufferCursor] == ' ')
+				inpBufferCursor++;
+			currentFace->vertCount = 0;
+			//if number wasn't read, represents it unused by leaving the values 0
+			vertAttribute[0] = 0;
+			vertAttribute[1] = 0;
+			vertAttribute[2] = 0;
+			//start of proper parsing of current line
+			while (inputBuffer[inpBufferCursor] != '\0') {
+				//check if cursor is at dividing character
+				if (inputBuffer[inpBufferCursor] == '/') {
+					indexType++;
+					inpBufferCursor++;
+				}
+				//check if cursor is at a number
+				else if (inputBuffer[inpBufferCursor] <= 57 && inputBuffer[inpBufferCursor] >= 48) {
+					//manual integer read to buffer, and then read with sscanf for stability
+					memset(indexBuffer, 0, sizeof(indexBuffer));
+					indexBufferCursor = 0;
+					while (inputBuffer[inpBufferCursor] <= 57 && inputBuffer[inpBufferCursor] >= 48) {
+						indexBuffer[indexBufferCursor] = inputBuffer[inpBufferCursor];
+						indexBufferCursor++;
+						inpBufferCursor++;
+					}
+					if (sscanf(indexBuffer, "%d", &vertAttribute[indexType]) != 1) {
+						printf("erroneous data in index buffer while parsing obj file. the file may be damaged or corrupted.\n");
+						goto freeMem;
+					}
+					if (indexType == 0) {
+						//if index type is vertex position
+						currentFace->geometryCenter = vectorAdd(currentFace->geometryCenter, meshVertex[vertAttribute[indexType] - 1]);
+					}
+					else if (indexType == 2) {
+						//if index type is vertex normal
+						currentFace->faceNormal = vectorAdd(currentFace->faceNormal, meshVertNormal[vertAttribute[indexType] - 1]);
+					}
+				}
+				//if cursor points to neither a number nor a dividing char
+				//endline concludes face data read
+				else {
+					currentFace->vertCount += 1;
+					//wavefront faces are in order of location - texture - normals
+					addVertAttribute(&currentFace->point, vertAttribute[0], vertexCount, currentFace->vertCount);
+					addVertAttribute(&currentFace->texture, vertAttribute[1], vertexCount, currentFace->vertCount);
+					addVertAttribute(&currentFace->normal, vertAttribute[2], vertexCount, currentFace->vertCount);
+					indexType = 0;
+					if ((inputBuffer[inpBufferCursor] > 57 || inputBuffer[inpBufferCursor] < 48) && inputBuffer[inpBufferCursor] != ' ' && inputBuffer[inpBufferCursor] == '/') {
+						printf("erroneous data in index buffer while parsing obj file. the file may be damaged or corrupted.\n");
+						goto freeMem;
+					}
+					while (inputBuffer[inpBufferCursor] == ' ')
+						inpBufferCursor++;
+					if (inputBuffer[inpBufferCursor] == '\n') {
+						currentFace->geometryCenter = vectorScale(1 / (double)(currentFace->vertCount), currentFace->geometryCenter);
+						currentFace->faceNormal = vectorScale(1 / (double)(currentFace->vertCount), currentFace->faceNormal);
+						break;
+					}
+				}
+			}
+			break;
+		case 'o':
+			//object
+			objectCount++;
+			heapMemPtr = realloc(sceneObject, sizeof(object) * objectCount);
+			if (heapMemPtr == NULL) {
+				printf("error while allocating memory for sceneObjects\n");
+				goto freeMem;
+			}
+			sceneObject = (object*)heapMemPtr;
+			inpBufferCursor = 2;
+			sceneObject[objectCount - 1].faceCount = 0;
+			sceneObject[objectCount - 1].shadeSmooth = 0;
+			sceneObject[objectCount - 1].name = (char*)malloc(sizeof(char*));
+			sceneObject[objectCount - 1].mesh = (face*)malloc(sizeof(face*));
+			while (inputBuffer[inpBufferCursor] != '\n') {
+				heapMemPtr = realloc(sceneObject[objectCount - 1].name, sizeof(char) * (inpBufferCursor - 1));
+				if (heapMemPtr == NULL) {
+					printf("error while allocating memory for object name parsing.\n");
+					goto freeMem;
+				}
+				sceneObject[objectCount - 1].name = (char*)heapMemPtr;
+				sceneObject[objectCount - 1].name[inpBufferCursor - 2] = inputBuffer[inpBufferCursor];
+				inpBufferCursor++;
+			}
+			break;
+		case 's':
+			//shade smooth
+			argCount = sscanf(inputBuffer, "s %d", &(sceneObject[objectCount - 1].shadeSmooth));
+			if (argCount != 1) {
+				printf("error while reading shade smooth options from provided obj file. the file may be damaged or corrupted.\n");
+				goto freeMem;
+			}
+			break;
+		default :
+			break;
+		}
+		fgets(inputBuffer, 256, modelInputOBJ);
+	}
+	
+	//////////////////// end of obj file parsing
+	objParsingEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	//perspectives ect initialization
+	perspDist = cameraScale / (2 * tan(FOV / 2));
+	printf("perspDist: %lf units\n", perspDist);
+	perspLV.z = perspDist;
+	heapMemPtr = realloc(screenspaceXY, sizeof(XY) * vertexCount);
+	if (heapMemPtr == NULL) {
+		printf("error while allocating memory for screenspaceXY.\n");
+		goto freeMem;
+	}
+	screenspaceXY = (XY*)heapMemPtr;
+	camTransformVector = vectorSubtract(worldOriginLV, cameraLV);
+	for (int i = 0; i < vertexCount; i++) {
+		vectorBuffer = vectorScale(-1 * perspDist / (meshVertex[i].z - perspDist), vectorSubtract(vectorAdd(meshVertex[i], camTransformVector), perspLV));
+		screenspaceXY[i].x = (unsigned int)(vectorBuffer.x * 100 + widthHalf);
+		screenspaceXY[i].y = (unsigned int)(vectorBuffer.y * 100 + heightHalf);
+	}
+	*/
+	/*
+	//code for checking contents of read data
+	for (int nowIndex = 0; nowIndex < vertexCount; nowIndex++)
+		printf("P%d: %lf %lf %lf\n", nowIndex, meshVertex[nowIndex].x, meshVertex[nowIndex].y, meshVertex[nowIndex].z);
+	for (int nowIndex = 0; nowIndex < vertNormalCount; nowIndex++)
+		printf("N%d: %lf %lf %lf\n", nowIndex, meshVertNormal[nowIndex].x, meshVertNormal[nowIndex].y, meshVertNormal[nowIndex].z);
+	for (int nowIndex = 0; nowIndex < vertTextureCount; nowIndex++)
+		printf("T%d: %lf %lf %lf\n", nowIndex, meshVertTexture[nowIndex].u, meshVertTexture[nowIndex].v, meshVertTexture[nowIndex].w);
+	*/
+
+	/*
+	for (int tarObj = 0; tarObj < objectCount; tarObj++) {
+		for (int tarFace = 0; tarFace < sceneObject[tarObj].faceCount; tarFace++) {
+			renderLine(render, perspDist, sceneObject[tarObj].mesh[tarFace].geometryCenter, vectorAdd(sceneObject[tarObj].mesh[tarFace].geometryCenter, sceneObject[tarObj].mesh[tarFace].faceNormal), camTransformVector, perspLV, colorPicker);
+			//renderPoint(render, perspDist, sceneObject[tarObj].mesh[tarFace].geometryCenter, camTransformVector, perspLV, colorPicker);
+			drawFaceOutline(render, sceneObject[tarObj].mesh[tarFace], screenspaceXY, colorPicker);
+		}
+	}
+	*/
+	XY trigTest[3];
+	trigTest[0].x = 50;
+	trigTest[0].y = 50;
+
+	trigTest[1].x = 10;
+	trigTest[1].y = 10;
+
+	trigTest[2].x = 40;
+	trigTest[2].y = 20;
+
+	drawTrigBland(render, trigTest[0], trigTest[1], trigTest[2], colorPicker);
+	drawLine(render, 10, 10, 20, 10, colorPicker);
+
+	vectorCalcEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	//writing whats in array 'render' to the actual file
+	for (int y = height - 1; y >= 0; y--) {
+		for (int x = 0; x < width; x++) {
+			fprintfRGB(renderResult, render[x][y].r, render[x][y].g, render[x][y].b);
+		}
+		fputc('\n', renderResult);
+	}
+
+freeMem:
+	fclose(modelInputOBJ);
+	fclose(renderResult);
+	free(render);
+	free(meshVertex);
+	free(meshVertNormal);
+	free(meshVertTexture);
+	free(screenspaceXY);
+	for (int tarObj = 0; tarObj < objectCount; tarObj++) {
+		free(sceneObject[tarObj].name);
+		for (int tarFace = 0; tarFace < sceneObject[tarObj].faceCount; tarFace++) {
+			free(sceneObject[tarObj].mesh[tarFace].point);
+			free(sceneObject[tarObj].mesh[tarFace].texture);
+			free(sceneObject[tarObj].mesh[tarFace].normal);
+		}
+		free(sceneObject[tarObj].mesh);
+	}
+	free(sceneObject);
+
+	endEXECTIME = (double)(clock()) / CLOCKS_PER_SEC;
+
+	printf(".obj file parsing: %lf\nvector calculation: %lf\nwritting the result to file: %lf\nTOTAL TIME: %lf\n", objParsingEXECTIME - startEXECTIME, vectorCalcEXECTIME - objParsingEXECTIME, endEXECTIME - vectorCalcEXECTIME, endEXECTIME - startEXECTIME);
+	return;
+}

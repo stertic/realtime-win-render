@@ -1,0 +1,2 @@
+v# is in reverse chronological order(so v1 is the last version before everything got moved to git, v14 is oldest)
+Project started out as ascii line rasterizer for inverse kinematics visualization, at some point after that i figured out ppm exporting so development on 3d scene renderer was done. after that i learned win32 api so I did major rewrite into C++(previous codes were all C) and implemented realtime rendering. From there on development was focused on realtime rendering.
